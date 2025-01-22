@@ -24,7 +24,8 @@
 This project provides an in-depth analysis of the Swiss housing market over the past decade. The goal is to give the client a clear understanding of the development of vacancy rates and the factors influencing the housing market in Switzerland. By examining trends and patterns, the project aims to highlight regional and linguistic variations and the potential impact of tax rates on vacancy rates. The results and findings can inform further studies or business decisions related to housing demand and market trends.
 
 # Project idea
-The study focuses on analyzing historical and current data to uncover trends in Switzerland’s housing market. It aims to:
+The study focuses on analyzing historical and current data to uncover trends in Switzerland’s housing market. 
+It aims to:
 
 - Understand how vacancy rates have evolved over the last decade.
 - Explore regional and linguistic disparities within the housing market.
@@ -55,7 +56,11 @@ The results reveal several key trends and insights about the Swiss housing marke
 - **Linear regression models** suggest that other factors, such as urbanization and infrastructure, may have a greater influence on vacancy rates than tax rates alone.
 
 
+The comprehensive insight into the project results can be found here: [Report]
+
+
 <!-- MARKDOWN LINKS & IMAGES -->
 [Vacancy Rates]: https://www.bfs.admin.ch/bfs/de/home/statistiken/bau-wohnungswesen/wohnungen/leerwohnungen.html
 [Municipalities]: https://www.swisstopo.admin.ch/de/amtliches-ortschaftenverzeichnis
 [Tax Rates]: https://www.estv.admin.ch/estv/de/home/die-estv/steuerstatistiken-estv/steuerbelastung-schweiz/belastung-gemeinden.html
+[Report]: https://github.com/Carlomk1/swiss-real-estate-development/blob/25cce85f0c29de1929ba390d751afb59e8e88d83/real-estate-development_report.pdf
