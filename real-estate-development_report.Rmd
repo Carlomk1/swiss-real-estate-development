@@ -1,0 +1,816 @@
+---
+title: "Insight into the development of the Swiss housing market over the past decade"
+author: "Tim Zoller & Carlo Scherrer"
+subject: "Assignment R-Bootcamp february 2024"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+  html_document: 
+    default
+date: "2024-02-10"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library, include=FALSE}
+library(readxl)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(randomcoloR)
+library(flextable)
+```
+# Introduction
+## Objective of the study
+The project group would like to prepare an analysis for the client in order to provide an up-to-date insight into the housing market in Switzerland. It is important for the client to understand the development of the housing market over the last ten years and the current situation. Furthermore, the client is interested in whether there are factors that have had an influence on the development of the housing market. With this knowledge of the past and the current situation, the future situation can then be analysed in a follow-up study.
+
+The aim of the project group is therefore to show the past development, identify general influencing factors and present the results to the client in a suitable form in order to recognise possible demand and factors
+
+## Area of investigation
+The geographical scope of the study is limited by the client's market, which is restricted to Switzerland. This study area of the housing market is further subdivided by the project group. 
+The spatial division (at cantonal level) and the linguistic division (regions of the national language) were identified as sub-areas. Based on this division, the housing market is analysed first and the tax rates in a second part. Following this analysis, the influence of tax rates on the housing market is analysed.
+The reason for selecting the tax rate factor is that it is a general parameter that affects the entire population and therefore does not exclude any parts of the population. The influence of tax rates can then be analysed in more detail on the basis of this and the spatial separation.
+
+## Data source & preparation
+The basic information for the analysis is available in two data sets, the federal government's empty dwelling census and the tax burden of the municipalities in the individual cantons. Additional information from the list of localities is also to be taken into account. In order to work with a main data frame, two joins take place and the data is cleaned. In the end, all relevant data is available to the client in one data frame.
+The contents of the data sets are summarised below:
+
+1. **empty dwelling census:**[^1]
+This data set is compiled annually by the federal government on the reference date of 1 June. It contains information on the number of vacant and available flats on the market. The figures are available for municipalities with over 5000 inhabitants and are subdivided into the room sizes of the flats and other classifications. An important indicator is the vacancy rate, which is calculated on the basis of the housing stock and the number of vacant flats per municipality.
+
+2. **tax burden of the municipalities:**[^2]
+This data set contains the tax rate per municipality & canton with regard to income, wealth, profit and capital tax.
+
+3. **list of localities:**[^3]
+The list of localities includes the cantonal affiliation, language, coordinates and postcode for each municipality. This dataset is used to link the vacancy count and tax burden data and to add further information.
+
+```{r income_rates_import, include=FALSE}
+##Import & manipulate all income rates between 2010 - 2022
+##All the files have to be downloaded separately: https://swisstaxcalculator.estv.admin.ch/#/taxdata/tax-rates
+##Store the files in a subfolder where this Rmd-file is stored
+pfad <- "01_datafiles_income_rates/estv_income_rates_"
+
+##Create a vector with all the column names
+##EK = Einkommen / VM = Vermögen / Gewinn = Gewinn- und Kapitalsteuersatz
+income_rates_column <- c("Kanton-ID", "Kanton", "BFSID", "Gemeinde", "EK-Kanton",
+                         "EK-Gemeinde", "EK-Kirche ref.", "EK-Kirche rom.-kt.",
+                         "EK-Kirche christkt.", "VM-Kanton",
+                         "VM-Gemeinde", "VM-Kirche ref.", "VM-Kirche rom.-kt.",
+                         "VM-Kirche christkt.", "Gewinn Kanton", "Gewinn Gemeinde",
+                         "Gewinn Kirche", "Kapital Kanton", "Kapital Gemeinde",
+                         "Kapital Kirche", "date")  # Added "date" to match the columns
+
+##each year of the observation stored in a vector: Attention starts with 2010
+jahre <- 2010:2022
+
+##create a list, in which each data frame of the tax-rates is stored
+##in each file skip the first 3 rows
+##add a column with each year of the observation and insert the pre-defined vector as header
+##combine all data frames to one data frame named all_rates
+all_rates <- map_df(jahre, ~read_excel(paste0(pfad, .x, ".xlsx"), skip = 3) %>%
+                     mutate(date = .x) %>%
+                     setNames(income_rates_column))  # Set new column names
+
+##Delete all "Kantonskürzel" in each location name: E.g Altdorf (UR) --> Altdorf
+##Rule therefore: Delete the part after the round-bracket if a emptyspace is after the location name --> " \\(.*"
+all_rates$Gemeinde <- sub(" \\(.*", "", all_rates$Gemeinde)
+##Check the results
+#head(all_rates)
+
+##Safe the data frame as a csv-file
+write.csv(all_rates, "02_other_data/all_income_rates.csv", fileEncoding = "UTF-8", row.names = FALSE)
+
+##Check the file: correct data and correct header 
+all_income_rates <- read.csv("02_other_data/all_income_rates.csv", fileEncoding = "UTF-8")
+#head(all_income_rates)
+#names(all_income_rates)
+
+##Check if "Kantonskürzel" are deleted: E.g Uri which contains Altdorf (UR)
+#EK.Uri <- all_income_rates %>%
+  #filter(Kanton == "UR")
+#EK.Uri
+
+##Could also be done with a RDS instead of csv-file format
+#?write.csv
+#?saveRDS
+#?readRDS
+
+```
+
+```{r wohnugsleerstand_import, include=FALSE}
+## Import & manipulate "Wohnungsleerstand 2023"
+path <- "02_other_data/Wohnungsleerstand_5000.xlsx"
+
+##each year of the observation stored in a vector: Attention starts with 2022
+jahre <- 2022:2010
+
+##Create a vector with all the column names
+columnnames <- c("BFSID", "Gemeinde", "Wohnungsbestand", "1Zimmer", "2Zimmer", "3Zimmer", "4Zimmer", "5Zimmer", "6Zimmer", "Total", "EFH", "Neu", "Zu vermieten", "Zu verkaufen", "Leerwohnungsziffer")
+
+##Special Task: The datas are not in separat files, they are in differents sheets in one file!
+##Therefore use a function
+read_and_process_sheet <- function(year) {
+  sheet_name <- as.character(year)
+  
+  ##Import all the sheets
+  ##skip the first 4 rows and add the column names
+  data <- read_excel(path, sheet = sheet_name, skip = 4)
+  colnames(data) <- columnnames
+  
+  ##Add the observation-years in a new column with a match between sheetname and the elements in vector year
+  data <- mutate(data, date = year)
+  return(data) #return value of the function
+}
+
+
+##Create an empty list --> return of function is stored in this list
+#class(Wohnungsleerstand_sheets)
+Wohnungsleerstand_sheets <- list()
+
+##access the function and iterate over each element
+for (year in jahre) {
+  Wohnungsleerstand_sheets[[as.character(year)]] <- read_and_process_sheet(year)
+}
+
+##Combine all elements of the list into one data frame
+df.Wohnungsleerstand <- bind_rows(Wohnungsleerstand_sheets)
+#class(df.Wohnungsleerstand)
+
+##Delete all "Kantonskürzel" in each location name: E.g Altdorf (UR) --> Altdorf
+##Rule therefore: Delete the part after the round-bracket if a emptyspace is after the location name --> " \\(.*"
+df.Wohnungsleerstand$Gemeinde <- sub(" \\(.*", "", df.Wohnungsleerstand$Gemeinde)
+
+##Check the result
+#df.Wohnungsleerstand
+
+```
+
+```{r BFSID_PLZ_import, include=FALSE}
+##Import & manipulate BFSID / PLZ
+##USe read.csv2 for correct format!
+plz_id <- read.csv2(file = "02_other_data/PLZ_BFSID.csv", fileEncoding = "UTF-8")
+
+##Create a vector with all the column names
+columnnames.plz.bfsid <- c("Gemeinde", "PLZ", "Zusatzziffer", "Gemeindename", "BFSID",
+                           "Kanton", "E", "N", "Sprache")
+
+##Add the column names
+plz_id <- setNames(plz_id, columnnames.plz.bfsid)
+
+##Check the result
+#str(plz_id)
+#head(plz_id)
+
+```
+
+```{r group.Gemeinde.by.Kanton, include=FALSE}
+##Group Gemeinde for each Kanton
+##Include the categorical variable "Sprache"
+bfsid.by.kant <- plz_id %>%
+  group_by(Gemeinde) %>%
+  summarise(Kanton = paste(Kanton, collapse = ","), Sprache) %>%
+  separate_rows(Kanton, sep = ",")
+bfsid.by.kant
+
+##In order to avoid duplicates, only the unique Gemeindenamen
+##Reason: A municipality (Gemeinde) can contain a locality (smaller unit) with the same name
+##Attention: this is now grouped!
+by.kant.unique <- unique(bfsid.by.kant)
+class(by.kant.unique)
+by.kant.unique
+
+##
+by.kant.unique$Gemeinde <- sub(" .*", "", by.kant.unique$Gemeinde)
+```
+
+```{r join.Wohnungsleerstand.Gemeindeinfos, include=FALSE}
+##First join: Join of the two following data frames
+#df.Wohnungsleerstand
+#by.kant.unique
+
+##Join the dataframes by value of Gemeinde
+df_joined <- df.Wohnungsleerstand %>%
+  inner_join(by.kant.unique, by = "Gemeinde")
+df_joined
+
+```
+
+```{r Join.Steuersatz, include=FALSE}
+##Second join: join the tax-rates information of each Gemeinde 
+##Join of df_joined with all_income_rates and remove column Kanton and BFSID
+df.main.table <- df_joined %>%
+  left_join(all_income_rates, by = c("Gemeinde", "date")) %>%
+  select(-c("Kanton.y", "BFSID.y")) %>%
+  rename(BFSID = BFSID.x, Kanton = Kanton.x) %>%
+  na.omit(df.main.table)
+df.main.table
+
+```
+
+# Visualized insights on Swiss vacant housing
+
+## National Level - Development of vacant flats in Switzerland
+Let's start by looking at Switzerland as a whole and then analyse the trend by language region and cantonal breakdown. An initial fundamental insight is gained by looking at the development of the average vacancy rate for all cantons. 
+The vacancy rate represents the proportion of vacant flats in the total housing stock[^4]:
+$$vacancy rate = \sum vacant flats * \frac{1}{\sum Total flats}$$
+The following note on the vacancy rate is important: This parameter must be viewed critically, as the recording of the value can vary from municipality to municipality. The Swiss Homeowners Association says the following[^5]:
+
+"The method used to determine the vacancy rate is at the discretion of the municipalities, which then forward it to the FSO for archival aggregation. HEV Switzerland therefore advises that this quota be carefully scrutinised. Some municipalities survey landlords and owners, others use data from the residents' registration office or rely on newspaper adverts and online advertisements, etc. The question of the statistical relevance of the vacancy rate therefore rightly arises. Many flats are not included in the statistics because they are advertised on the notice board of a grocery shop, for example, or are rented out again within a short period of time and therefore never appear in the vacancy statistics. Due to these incomplete records, expressions such as "housing shortage" or "housing shortage" are often misused as catchphrases. HEV Switzerland and other players in the property sector are therefore campaigning for an alternative to the vacancy rate - such as the supply rate or the marketing period - to be used in the legislation as an indicator of tight or relaxed property markets.[^6]"
+
+Despite the limitation, the key figure provides a basic insight and allows municipalities to be compared with each other. This key figure is used in this report as it is available as a public source and is easy to interpret.
+
+But what has the vacancy rate looked like over the last 12 years? Take a look at chart (figure 1) on the following page.
+
+\newpage
+
+```{r grouplwz.all.kanton, include=FALSE}
+##Calculate the mean of each Canton for each year
+lwz_per_kanton_jahr <- df.main.table %>%
+  group_by(Kanton, date) %>%
+  summarise(mittel_lwz = mean(Leerwohnungsziffer, na.rm = TRUE), .groups = "drop")
+
+#lwz_per_kanton_jahr
+ungroup(lwz_per_kanton_jahr)
+
+# ##Create a flextable to check those results --> no output (as comment)
+# ##USe pivot_wider to get the years in the header
+# lwz_wide <- lwz_per_kanton_jahr %>%
+#   pivot_wider(names_from = date, values_from = mittel_lwz)
+# 
+# ##Create a new row and calculate the mean ov each year overall cantons
+# gesamt_mittel_lwz <- df.main.table %>%
+#   group_by(date) %>%
+#   summarise(Gesamt = mean(Leerwohnungsziffer, na.rm = TRUE)) %>%
+#   pivot_wider(names_from = date, values_from = Gesamt)
+# 
+# ##join the data calculated before with bind_rows
+# lwz_wide_gesamt <- bind_rows(lwz_wide, gesamt_mittel_lwz)
+# 
+# ##Problem: we need numeric values to round the data on two decimals
+# ##
+# numerische_spalten <- sapply(lwz_wide_gesamt, is.numeric)
+# lwz_wide_gesamt[numerische_spalten] <- lapply(
+#   lwz_wide_gesamt[numerische_spalten],
+#   function(x) format(round(x, 2), nsmall = 2))
+# 
+# ##Create a flextable and print the last row in bold with the overall values
+# ft.lwz.year <- flextable(lwz_wide_gesamt)
+# ft.lwz.year <- bold(ft.lwz.year, i = nrow(lwz_wide_gesamt))
+# ft.lwz.year
+```
+
+```{r all.kanton, include=FALSE}
+##Create data frame with mean of Leerwohnungsziffer for each year
+mittel_lwz_pro_jahr <- df.main.table %>%
+  group_by(date) %>%
+  summarise(mittel_lwz = mean(Leerwohnungsziffer, na.rm = TRUE), .groups = "drop")
+
+##Check the new dataframe
+#mittel_lwz_pro_jahr
+```
+
+```{r plt.all.kanton, fig.height=6, fig.width=10, fig.cap="Average vacancy rate of all cantons per year", echo=FALSE}
+##Creation of a plot for the development of the average vacancy rate over the years
+ggplot(mittel_lwz_pro_jahr, aes(x = date, y = mittel_lwz)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Average vacancy rate of all cantons per year",
+       x = "Year",
+       y = "Average vacancy rate") +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(2010, 2022, by = 1)) +
+  scale_y_continuous(limits = c(1, 2.0),breaks = seq(1, 2.0, 0.25))
+```
+
+At the start of the observation, the vacancy rate was just below 
+`r round(mittel_lwz_pro_jahr, digits = 2) %>% filter(date == 2010) %>% pull(mittel_lwz)`. Over the next 9 years, the indicator rose to almost 2.0, before falling again since 2019 to almost the same level as in 2010. In 2022, therefore, only 
+`r round(mittel_lwz_pro_jahr, digits = 2) %>% filter(date == 2022) %>% pull(mittel_lwz)` of all residential properties were vacant. In absolute figures, this concerns `r format(df.main.table %>% filter(date == 2022) %>% summarise(summe_total = sum(Total, na.rm = TRUE)) %>% pull(summe_total), scientific = FALSE)` flats.
+
+With these basic findings, the vacancy rates and the development can now be broken down further. For this purpose, the next chapter looks at a breakdown into language regions.
+
+\newpage
+
+## Development of vacant flats according to language region
+As we have already seen, the vacancy rate has initially risen in the years since 2010 and then fallen in the last 4 years. In order to gain further insights, we would like to analyse the distribution of the vacancy rate for each language region. This could be an initial indicator of different distributions based on a demarcation (language region).
+
+Please note that only municipalities with more than 5000 inhabitants are included in the analysis. This could be a reason why there are no outliers in the Romansh region (if we filter the municipalities according to Romansh, only one municipality is included. This can be explained by the fact that the language is mainly spoken in the remote areas of Switzerland, where the number of inhabitants per municipality is quite low).
+
+```{r bplot.lang.reg., echo=FALSE, fig.cap="distribution of vancancy rate per language region since 2010"}
+##Plot all observation since 2010 in a boxplot for each language region
+boxplot(df.main.table$Leerwohnungsziffer ~ df.main.table$Sprache, 
+        col = c("skyblue", "lightgreen", "red", "brown"), xlab = "language region",
+        ylab = "vacancy rate", 
+        main = "distribution of vancancy rate per language region since 2010")
+
+##Check how many muncipalities in the region Romansh are evaluated --> just 1!
+# rm.sprache <- df.main.table %>%
+#   filter(Sprache == "rm")
+# rm.sprache
+# print(rm.sprache, n = Inf)
+```
+
+The boxplot above summarises all observations over the period and gives a good overview of the range and distribution of vacancy rates. In the German- and French-speaking regions, there are several outliers when observing the mean values of the vacancy rate. This is due to the fact that the population of the municipalities analysed in the linguistic regions of German- and French-speaking Switzerland is significantly larger than in Italian- and Romansh-speaking Switzerland.
+
+\newpage
+
+In order to be able to make a statement about the development, we look at the development of the vacancy rate in a line chart:
+
+```{r grouplwz.language.region, include=FALSE}
+##Calculating the mean vancancy rate of each language region
+lwz_per_lang_jahr <- df.main.table %>%
+  group_by(Sprache, date) %>%
+  summarise(mittel_lwz_lang = mean(Leerwohnungsziffer, na.rm = TRUE), .groups = "drop")
+
+#lwz_per_lang_jahr
+ungroup(lwz_per_lang_jahr)
+
+lwz_wide <- lwz_per_lang_jahr %>%
+  pivot_wider(names_from = Sprache, values_from = mittel_lwz_lang)
+#lwz_wide
+```
+
+```{r plt.language.region, echo=FALSE, fig.cap = "Vacancy rate per language region over the years"}
+##Create a line for each language region and for every mean-observation a point
+ggplot(lwz_wide, aes(x = date)) +
+  geom_line(aes(y = `de`, color = "German")) +
+  geom_point(aes(y = `de`, color = "German"), size = 2) +
+  geom_line(aes(y = `fr`, color = "French")) +
+  geom_point(aes(y = `fr`, color = "French"), size = 2) +
+  geom_line(aes(y = `it`, color = "Italian")) +
+  geom_point(aes(y = `it`, color = "Italian"), size = 2) +
+  geom_line(aes(y = `rm`, color = "Romansh")) +
+  geom_point(aes(y = `rm`, color = "Romansh"), size = 2) +
+  labs(title = "Vacancy rate per language region over the years",
+       x = "Year",
+       y = "Average vancancy rates",
+       color = "Language region") +
+  theme_minimal() +
+  scale_color_manual(values = c("skyblue", "lightgreen", "red", "brown")) +
+  scale_x_continuous(breaks = seq(2010, 2022, by = 1)) +
+  scale_y_continuous(limits = c(0, 4),breaks = seq(0, 4, 0.5))
+
+```
+
+The first interesting results that were not directly recognisable in the box plot become visible: 
+Italian-speaking Switzerland currently has the highest vacancy rate, although the values in 2010 were still identical to those of German-speaking Switzerland. The development, especially from 2015 onwards, leads to a large difference in the year of the final analysis 2022. It can also be seen that the two regions of German-speaking and French-speaking Switzerland have shown a similar decline since 2020 and are almost at the same level at the end. 
+
+The question arises how the development of the vacancy rate will look in an even more detailed breakdown. For this study, the next step will be to divide the data among the cantons of Switzerland, so that instead of 4 areas, 26 areas of Switzerland will now be analysed.
+
+\newpage
+
+## Canton Level
+One level lower than the breakdown by national language is the breakdown of municipalities by cantonal affiliation. This insight shows more detailed results at a geographical level than the distinction between language regions. 
+
+### Overview of empty flats according to Canton
+```{r lplt_lwz_wrap, fig.height=8, fig.width=10, echo=FALSE,  fig.cap = "mean vacancy rates of all municpalities per canton between 2010 to 2022"}
+##mean vacancy rates per year of all municipalities in each canton
+##Creates a plot for each canton with the same axis-levels for the period of observation from 2010 to 2022
+ggplot(lwz_per_kanton_jahr, aes(x = date, y = mittel_lwz)) +
+  geom_line() +
+  facet_wrap(~ Kanton, scales = "free_y") +
+  ylim(0, 5) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(title = "mean vacancy rates of all municpalities per canton between 2010 to 2022",
+       x = "Year",
+       y = "Average vacancy rates") +
+   scale_x_continuous(breaks = seq(min(lwz_per_kanton_jahr$date), max(lwz_per_kanton_jahr$date), by = 2))
+```
+
+Looking at the individual trends in the vacancy rate per canton, it is noticeable from a purely visual perspective that since the defined starting point in 2010, it is primarily the rural and less urban cantons that have recorded an increase. This applies to the cantons of Appenzell Innerrhoden, Appenzell Ausserroden, Glarus, Jura, Ticino and Valais. Cantons with large cities and urban regions (Bern, Aargau, Zurich, Lucerne and St.Gallen) show a more even vacancy rate. However, a conclusive interpretation of similarities or general trends between the cantons is difficult to make on the basis of the available data. 
+
+Only the finding that the canton of Jura has a "strongly" increasing vacancy rate is "clear". In order to clarify the current status of the vacancy rate, the key figure is viewed on the national map, with a comparison between the start year (2010) and end year (2022) of the observations.
+
+\newpage
+
+### Chapter of choice: Vacancy rates visualized on maps
+A direct comparison of the vacancy rate for 2010 and 2022 shows that the cantons of Jura, Ticino and Valais in particular have rising values. The areas of the cantons are coloured according to the value of the vacancy rate: The lighter the coloured area, the higher the vacancy rate: 
+
+```{r lwz.map.2022, include=FALSE}
+##Loading geometry data by Swiss canton 
+swiss_cantons <- st_read("03_files_maps_CH/G1K09.shp")
+
+#Grouping the vacancy rates of the municipalities by canton and the two reference years
+#This data frame below contains all the information: Canton names - shorthand canton name - date(year) - geographic locations (geometry)
+v.lwz.years <- df.main.table %>%
+  group_by(Kanton, date) %>%
+  summarise(MeanLWZ = mean(Leerwohnungsziffer, na.rm = TRUE), .groups = "drop") %>%
+  filter(date %in% c("2010", "2022"))
+
+##Linking the two dataframes
+v.lwz.years <- left_join(swiss_cantons, v.lwz.years, by = c("KURZ" = "Kanton"))
+```
+
+```{r plt.map.2022, fig.height=8, fig.width=10, echo=FALSE, fig.cap = "Vacancy rate per canton: 2010 vs 2022"}
+##Create two map plots one below the other with the scale on the left of the graphs
+ggplot(v.lwz.years, aes(fill = MeanLWZ)) +
+  geom_sf() +
+  facet_grid(rows = vars(date)) +
+  labs(fill = "Average vacancy rate",
+       title = "Vacancy rate per canton: 2010 vs 2022") +
+  theme_minimal() +
+  #scale_fill_viridis_c(option = "B")
+  scale_fill_gradient(low = "grey", high = "yellow")
+
+```
+
+The general comparison at cantonal level and the interpretation of their location (rural/urban) makes it difficult to draw meaningful conclusions.
+difficult to draw meaningful conclusions. For the project group, no correlation regarding the development of differences in the vacancy rate in rural and urban areas can be recognized purely from the visual observation of the results in the above figure. For this reason, another aspect that could indicate a certain symptomatology has been taken into consideration. 
+
+The next chapter therefore takes a closer look at the development of vacant dwellings according to their room size.
+
+\newpage
+
+## Specific insights: Overview of empty flats according to room types
+In addition to the total number of detached residential properties in absolute figures, the data collection also includes their breakdown by number of rooms in the flat. The breakdown provides for six different types: 1-, 2-, 3-, 4-, 5-, or 6 and more rooms.
+
+The aim of the analysis is to show whether certain flats have a particularly high or low vacancy rate, depending on the number of rooms. This insight would indicate which flat size (by room) is in demand or less favoured by the Swiss population.
+
+``` {r sum.room.type.date, include=FALSE}
+##Piechart for the sum of vancant flats per roomtypes
+##First create a data frame with the needed data
+##install.packages("randomcoloR") first if needed!
+
+df.free.room.type <- df.main.table %>%
+  summarise(
+    "1 room" = sum(`1Zimmer`, na.rm = TRUE),
+    "2 rooms" = sum(`2Zimmer`, na.rm = TRUE),
+    "3 rooms" = sum(`3Zimmer`, na.rm = TRUE),
+    "4 rooms" = sum(`4Zimmer`, na.rm = TRUE),
+    "5 rooms" = sum(`5Zimmer`, na.rm = TRUE),
+    "6 rooms" = sum(`6Zimmer`, na.rm = TRUE)
+  )
+
+df.free.room.type
+
+df.free.room.long <- pivot_longer(df.free.room.type, cols = everything(), 
+                                         names_to = "Zimmertyp", values_to = "Summe")
+```
+
+``` {r plt.room.type.date, echo=FALSE, fig.cap = "Totals of vancant flats by room type since 2010"}
+##Piechart for the sum of vancant flats per roomtypes is created here:
+zimmertype <- c(1:6)
+n <- 6
+palette <- distinctColorPalette(n)
+
+pie(df.free.room.long$Summe, 
+    labels = paste(df.free.room.long$Zimmertyp, df.free.room.long$Summe), 
+    main = "Totals of vancant flats by room type since 2010", 
+    col = palette)
+```
+
+The figures above show the total number of vacant flats by number of rooms. The largest proportion of vacant flats are 3- and 4-bedroom flats. Together, these make up well over 50% of all vacant flats on the market. To provide a better insight into the trend, two tables are provided below, showing the absolute figures per year and the proportion of the total housing stock.
+
+\newpage
+
+``` {r ft.sum.roomtypes, echo=FALSE}
+##Create a table with the lirbrary(felxtable)
+##One column per room type with index column of the years
+##Convert the date column into a character string. Useful as it is displayed in the table as a non-numerical value.
+
+set_flextable_defaults(fonts_ignore = TRUE)
+
+df.room.type <- df.main.table %>%
+  group_by(date) %>%
+  summarise(
+    "1 room" = sum(`1Zimmer`, na.rm = TRUE),
+    "2 rooms" = sum(`2Zimmer`, na.rm = TRUE),
+    "3 rooms" = sum(`3Zimmer`, na.rm = TRUE),
+    "4 rooms" = sum(`4Zimmer`, na.rm = TRUE),
+    "5 rooms" = sum(`5Zimmer`, na.rm = TRUE),
+    "6 rooms" = sum(`6Zimmer`, na.rm = TRUE)
+  ) %>%
+  mutate(date = as.character(date))
+
+##Call the package before the function, if not the function can not be found!
+##Solution by Klaus, thank you ;)
+ft <- df.room.type %>% 
+  flextable::flextable() %>% 
+  flextable::set_caption(flextable::as_paragraph(flextable::as_b('Absolute flat vacancies by room type')))
+
+ft <- bold(ft, part = "header")
+ft
+```
+**Table 1: Absolute number of vacant flats by room type**
+This table shows the number of vacant flats by number of rooms from 2010 to 2022. It is striking that the number of vacant flats, especially 3- and 4-room flats, has risen steadily over the years. This suggests an increase in the supply of flats in these categories. In 2022, the absolute number of vacant flats is significantly higher than in 2010, although the vacancy rate is almost at the same level as in 2010. This indicates that new flats have been built despite a persistently low vacancy rate, which has increased the overall housing stock.
+
+\newpage
+``` {r ft.percent.roomtypes, echo=FALSE}
+##Now the previous table slightly changed
+##For the shares of room types in the total housing stock
+
+set_flextable_defaults(fonts_ignore = TRUE)
+
+df.room.type.2 <- df.main.table %>%
+  group_by(date) %>%
+  summarise(
+    "1 room" = round(100 * sum(`1Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2),
+    "2 rooms" = round(100 * sum(`2Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2),
+    "3 rooms" = round(100 * sum(`3Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2),
+    "4 rooms" = round(100 * sum(`4Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2),
+    "5 rooms" = round(100 * sum(`5Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2),
+    "6 rooms" = round(100 * sum(`6Zimmer`, na.rm = TRUE) / sum(Wohnungsbestand, na.rm = TRUE), 2)
+  ) %>%
+  mutate(date = as.character(date))
+
+
+##Call the package before the function, if not the function can not be found!
+ft.2 <- df.room.type.2 %>% 
+  flextable::flextable() %>% 
+  flextable::set_caption(flextable::as_paragraph(flextable::as_b('Proportion of flats by room type in the total housing stock')))
+
+ft.2 <- bold(ft.2, part = "header")
+ft.2
+```
+
+**Table 2: Proportion of flats by room type in the total housing stock**
+This table shows the percentage of vacant flats of different room types in relation to the total housing stock. The data shows that
+the proportion of 3- and 4-bedroom detached dwellings in the total stock has increased over the years. There are two possible reasons for this increase: more 3- and 4-bedroom flats may have been built, meaning that they are more prevalent on the market, or the population's demand for these flat sizes has decreased, leading to an increased vacancy rate.  In 2022, the proportion of 1- and 2-room flats in the total housing stock is lower than in previous years (since 2017), which could indicate less new construction activity in these categories.
+
+It could be concluded from the data that the distribution of vacant flats by room type is influenced by both construction activity and demand for specific flat types. These interpretations should be viewed with caution and are only a possible assumption. The figures merely reflect the distribution of vacant flats by size and other important factors may have influenced the figures. Another factor is therefore analysed in the following chapter. The question of the extent to which the tax burden in the municipalities and cantons influences the vacancy rate is analysed. 
+
+It is analysed whether there is a correlation between the level of the tax burden and the vacancy rate in order to draw possible conclusions about the influence of tax policy on the housing market. First, income tax is analysed in more detail before a possible correlation is examined.
+
+\newpage
+
+# Linear Model
+## Overview of income tax rates
+In the search for factors that have an influence on our target figure for the vacancy rate, the project group orientated itself on the following two points:
+
+1. The factor must generally represent or affect the entire population. No population stratum or geographical region should be neglected.
+2. Sufficient data must be available and freely accessible (in the past as well as in the future) to determine the factor.
+
+During the research, it quickly became apparent that the tax rates of municipalities (in terms of income and wealth) are a good factor. These are collected annually by the Federal Tax Administration for all municipalities in Switzerland and are freely accessible. Furthermore, the entire population eligible for the use of housing is affected by this factor.
+
+Before the hypothesis and the corresponding model are created, a closer look at the data follows.
+
+```{r mean.EK.Gemeinde, include = FALSE}
+##Berechnen der Mittelwerte der Gemeinde Einkommenssteuersätze je Kanton
+mean.EK.Gem <- df.main.table %>%
+  group_by(Kanton, date) %>%
+  summarise(Meanwlz = mean(EK.Gemeinde, na.rm = TRUE))
+#mean.EK.Gem
+```
+
+```{r hplt_income_rates, echo=FALSE, fig.cap="10-year average of income tax rates per canton"}
+##Average tax income rates per canton over all years
+ggplot(mean.EK.Gem, aes(x = Kanton, y = Meanwlz)) +
+  geom_bar(stat = "summary", fun = "mean") +
+  labs(title = "10-year average of income tax rates per canton", 
+       x = "Canton", 
+       y = "Average income tax rate")
+```
+
+The first interesting insight is provided by the average income tax rate from 2010 to 2022 for all municipalities grouped by canton.
+
+It can be seen that despite averaging the data over a longer period (12 years), certain cantons have a much higher income tax rate than others. This led the project group to speculate that the cantons with a high income tax rate might have a higher vacancy rate. The reason for this assumption is that it may be less financially viable to live in these cantons and therefore more vacant flats are available.
+
+```{r lplt_income_rates, fig.height=8, fig.width=10, echo=FALSE, fig.cap="Average income tax rate for each canton from 2010 - 2022"}
+ggplot(mean.EK.Gem, aes(x = date, y = Meanwlz, group = Kanton, color = Kanton)) +
+  geom_line(linewidth = 1) +
+  labs(x = "year",
+       y = "Average income tax rate") +
+  ggtitle("Average income tax rate for each canton from 2010 - 2022") +
+  theme_minimal() +
+  scale_x_continuous(limits = c(2010, 2022), breaks = seq(2010,   2022, by = 2))+
+  scale_y_continuous(limits = c(0,500), breaks = seq(0,500, by = 75))+
+  facet_wrap(~Kanton) +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 90, hjust = 0.5))
+```
+
+To ensure that there are no major outliers in the 12-year period under review, the average income tax rates of the municipalities per canton per year are shown below.
+
+It is clearly recognisable in the individual curves that the values have decreased or increased slightly over time. There are no outliers. With these basic findings, the influence of the income tax rate is now analysed in the following chapter.
+
+\newpage
+
+## Hypothesis
+We assume that there will be a negative correlation between low vacancy rates and low income taxes in Switzerland between 2010 and 2022. This assumption is based on the consideration that regions with low vacancy rates can increasingly be considered desirable places to live due to attractive tax conditions. It is assumed that people tend to move to regions with low income taxes as this can potentially lead to higher disposable income.
+Furthermore, we assume that low income tax rates could be an incentive to move to certain regions, which in turn could lead to higher demand for housing. Increasing demand could help to ensure that vacancy rates in such regions tend to remain low as housing is effectively utilized and the population remains stable or increases.
+These assumptions form the basis for our hypothesis and the analyses derived from it.
+
+## Analysing the model
+In a first step, we mapped the vacancy rate and income tax for the years 2010 - 2022 and superimposed the regression line. 
+It can be seen that the regression lines for each year is almost horizontal, indicating that income tax is not a good variable for predicting the vacancy rate (see figure 9 on the following page). 
+
+```{r EK.WLZ.Gem, fig.height=15, fig.width=10, echo=FALSE, message=FALSE, warning=FALSE}
+
+##Calculating the average values of the vacancy rate per canton and date
+mean.LWZ <- df.main.table %>%
+  group_by(Kanton, date) %>%
+  summarise(MeanLWZ = mean(Leerwohnungsziffer, na.rm = TRUE))
+
+##Combining the mean values of income tax with the mean values of the vacancy rate
+combined_data <- left_join(mean.EK.Gem, mean.LWZ, by = c("Kanton", "date"))
+
+```
+
+```{r scatterplott.EK.WLZ.Gem, fig.height=12, fig.width=10, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Average vacancy rate & average income tax per canton"}
+##Scatterplot Steuersatz EK.Gemeinde je Kanton - WLZ
+ggplot(combined_data, aes(x = MeanLWZ, y = Meanwlz, color = Kanton)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(title = "Average vacancy rate & average income tax per canton",
+       x = "Average vacancy rate",
+       y = "Average income tax per canton") +
+  facet_wrap(~date) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+In order to test our hypothesis and our observations from the figures with statistical indicators, we performed a linear regression between the vacancy rate and income taxes using data from 2010 - 2022. The model shows a statistically significant correlation between the two variables p-value = 2.02e-11. However, with an R\(^2\) value of 0.007, the model can only explain very little of the variance. In addition, the estimate value of 0.002 is very small, meaning that the influence of income tax on the empty dwelling rate is negligible (Table 3).
+
+```{r linear.regression.model,echo=FALSE}
+##linear regression for one factor
+fit <- lm(df.main.table$Leerwohnungsziffer ~ df.main.table$EK.Gemeinde)
+summary_fit <- summary(fit)
+
+rsquared <- round(summary_fit$r.squared,4)
+
+tidy_fit <- broom::tidy(fit)
+
+flex_table <- flextable(tidy_fit)
+
+##round p-values
+p_value <- round(summary_fit$coefficients["df.main.table$EK.Gemeinde", "Pr(>|t|)"], 4)
+
+##formatting p-values in a scientific way
+formatted_value <- format(p_value, scientific = TRUE)
+
+star <- ifelse(p_value < 0.05, "  * ", " ")
+
+##Create a dataframe from the linear regression  
+flex_table_data <- data.frame(
+  Variable = c("Einkommensteuer Gemeinde"),
+  P_Value = c(paste0(formatted_value, star)),
+  Estimate_Value = round(tidy_fit$estimate[2], 4),
+  R_Squared = round(summary_fit$r.squared, 4)
+)
+
+#Create a dataframe from the linear regression  
+#Creating a table from the dataframe
+flex_table <- flextable(flex_table_data)
+
+flex_table <- flex_table %>%
+  set_caption("Summarised values from the linear regression") %>%
+  align(align = "center", part = "all") %>%
+  set_header_labels(
+    Variable = "Variable",
+    P_Value = "P-Value", 
+    Estimate_Value = "Estimate", 
+    R_Squared = "R\u00B2"
+  ) %>%
+  width(j = ~Variable, width = 2) %>%  #Attention: Adjusting the width of the column must be done manually.
+  width(j = ~P_Value, width = 1.2) %>%
+  width(j = ~Estimate_Value, width = 1.2) %>%
+  width(j = ~R_Squared, width = 1) %>%
+  bold(part = "header")
+
+
+
+flex_table
+
+```
+
+
+In a next step, we extended the linear model with the two variables wealth tax and profit tax. The F-statistic with a p-value = 6.063e-13 shows that at least one of the three variables has a statistically significant influence on the vacancy rate.  In the new model, income tax with a p-value of 0.098 no longer reaches statistical significance. Wealth tax also fails to achieve statistical significance with a p-value of 0.1058. In contrast, the p-value of the profit tax shows a statistical significance p-value = 0.0004. However, the R\(^2\) value of 0.0099 is still extremely small and can only explain a marginal part of the variance. The estimate values of the three variables are also very small, so that this model also shows that the influence of the three variables on the vacancy rate is negligible (Table 4).
+
+```{r linear.regression.model2, echo=FALSE}
+##running linear model for several factors
+fit2 <- lm(df.main.table$Leerwohnungsziffer ~ df.main.table$EK.Gemeinde + 
+            df.main.table$VM.Gemeinde + df.main.table$Gewinn.Gemeinde)
+summary_fit2 <-summary(fit2)
+
+##round p-values
+p_valueEK <- round(summary_fit2$coefficients["df.main.table$EK.Gemeinde", "Pr(>|t|)"],4)
+p_ValueVM <- round(summary_fit2$coefficients["df.main.table$VM.Gemeinde", "Pr(>|t|)"],4)
+p_valueGE <- round(summary_fit2$coefficients["df.main.table$Gewinn.Gemeinde", "Pr(>|t|)"],4)
+
+##creating p-value vector
+p_values2 <- c(p_valueEK, p_ValueVM, p_valueGE)
+
+##formatting p-values in a scientific way
+formatted_value2 <- format(p_values2, scientific = TRUE)
+
+##accessing estimate values and store in a vector
+est_EK <- round(summary_fit2$coefficients["df.main.table$EK.Gemeinde", "Estimate"],4)
+est_VM <- round(summary_fit2$coefficients["df.main.table$VM.Gemeinde", "Estimate"],4)
+est_GE <- round(summary_fit2$coefficients["df.main.table$Gewinn.Gemeinde", "Estimate"],4)
+estimates <- c(est_EK,est_VM,est_GE)
+
+##Creating the P-values with asterisks for significant values
+p_values2_star <- p_values2
+p_values2_star[p_values2 < 0.05] <- paste0(p_values2[p_values2 < 0.05], " *")
+
+##Dataframe for the Flextable
+flex_table_data2 <- data.frame(
+  Variable = c("Einkommensteuer Gemeinde", "Vermögenssteuer Gemeinde", "Gewinnsteuer Gemeinde"),
+  P_Value = p_values2_star,
+  Estimate_Value = estimates,
+  R_Squared = round(summary_fit2$r.squared, 4)
+)
+
+##Create a table from the dataframe
+##Create a table from the dataframe
+flex_table2 <- flextable(flex_table_data2)
+
+flex_table2 <- flex_table2 %>%
+  set_caption("Summarised values from the linear regression") %>%
+  align(align = "center", part = "all") %>%
+  set_header_labels(
+    Variable = "Variable",
+    P_Value = "P-Value", 
+    Estimate_Value = "Estimate", 
+    R_Squared = "R\u00B2"
+  ) %>%
+  width(j = ~Variable, width = 2) %>%  #Attention: Adjusting the width of the column must be done manually.
+  width(j = ~P_Value, width = 1.2) %>%
+  width(j = ~Estimate_Value, width = 1.2) %>%
+  width(j = ~R_Squared, width = 1) %>%
+  bold(part = "header")
+
+##Display the Flextable
+flex_table2
+
+```
+
+In summary, it can be said that the overall model is indeed statistically significant. However, the specific influences of income tax, wealth tax and probably profit tax on the vacancy rate are not clearly demonstrable. 
+
+\newpage
+
+# Generative AI
+During the project, the project group tried to use generative AI as little as possible and only in a targeted manner. One application was to help formulate the following function:
+
+```{r function.AI, eval=FALSE}
+##Special Task: The datas are not in separat files, 
+##they are in differents sheets in one file!
+##Therefore use a function
+read_and_process_sheet <- function(year) {
+  sheet_name <- as.character(year)
+  
+  ##Import all the sheets
+  ##skip the first 4 rows and add the column names
+  data <- read_excel(path, sheet = sheet_name, skip = 4)
+  colnames(data) <- columnnames
+  
+  ##Add the observation-years in a new column 
+  ##with a match between sheetname and the elements in vector year
+  data <- mutate(data, date = year)
+  return(data) #return value of the function
+}
+```
+Research into the structure of the function was unsuccessful, so the AI was used as support. Without this function or the support of AI, the data preparation would have been considerably less efficient and would have significantly more time resources. To summarise, it can be said that the use of AI is particularly worthwhile when it comes to answering specific technical questions, in our case about a particular code. However, it is important to always check the results and interpret them depending on the context.The project group was also able to expand its knowledge by using AI. It was easy to ask about related topics and generate simple examples. This is particularly helpful when only a little basic knowledge is available.
+
+# Limitations
+Although the data set is quite large, our study contains some limitations that need to be considered. 
+The study most certainly does not take into account all relevant factors that could influence the vacancy rate. There may be several other factors such as economy, social or demographic factors, Shopping facilities, a public transport connection, cinema, sports and cultural activities or even hours of sunshine that were not included in the analysis but could nevertheless have a significant influence. 
+By selecting municipalities with more than 5,000 inhabitants, smaller municipalities that may have different socio-economic and tax profiles are excluded. This can lead to a distorted picture, as the results cannot be generalized to municipalities of different sizes. 
+The real estate market is complex and dynamic. Factors such as construction activity, immigration and external economic influences can play a significant role and may not have been adequately taken into account.
+Furthermore the linear regression model was performed using only the total vacancy rate. The different types of real estate (apartments, single-family homes, commercial real estate) were not considered separately.
+
+\newpage
+
+# Discussion and Conclusions
+Our first chart shows that the vacancy rate for municipalities with more than 5,000 inhabitants throughout Switzerland rose continuously from 2010 to 2019, but has been falling steadily since then. The coronavirus crisis, which led to considerable delays in the delivery of building materials, is likely to have contributed to the fact that less was built from 2019 onwards and therefore fewer new apartments came onto the market. 
+In addition, building permits have been trending downwards for a number of years as investors have become more cautious and there is less and less building land on the market. These two factors are also likely to have contributed to the decline in the vacancy rate since 2019. Another factor is likely to be the reduced emigration due to the coronavirus crisis. Many people did not want to or were not allowed to emigrate during the coronavirus crisis, which contributed to the housing shortage. 
+The boxplot shows slight differences in the vacancy rate between the different language regions of Switzerland. The municipalities in Ticino had the highest number of empty apartments between 2010 and 2022, followed by the German and French-speaking municipalities. The Romansh-speaking municipalities had the fewest empty apartments. However, it should be noted here that only one Romansh-speaking municipality was included in the analysis
+
+Figure three reinforces the content of figures one and two. From 2010 to 2019, the number of vacant apartments increased continuously in all language regions in municipalities with more than 5,000 inhabitants. Since then, the vacancy rate in German-, French- and Romansh-speaking municipalities has fallen slightly. In Ticino, this decline can only be observed from 2021. 
+It is very difficult to estimate why the vacancy rate in Ticino only started to decline two years later. Figure 4 shows the vacancy rates of each canton over time. The canton of Zug, with its notoriously low tax rate, has some of the lowest vacancy rates with very small fluctuations. The canton of Geneva, with its proximity to France and high level of immigration, also has a very low vacancy rate, as do the two urban cantons of Basel and Zurich. It would appear that urban life, with its diversity and quality of services, favors a low vacancy rate. Rural cantons such as the canton of Jura, the two cantons of Appenzell and the canton of Soloturn tend to have the highest vacancy rates, along with Ticino. In rural regions, many "points of interest" are only accessible at great expense; in some villages, there is a risk that the public service will be dismantled. What ultimately remains is a small village store, a bakery and two restaurants. In contrast, city life is of a completely different quality because the range of services is much more diverse. Whatever you need or want to do - in an urban environment, many things are just around the corner.
+
+The vacancy rate has been falling across Switzerland as a whole and in practically all language regions since 2019. However, Figure 5 shows that the 2010 level has not yet been reached. There were still relatively more vacant apartments in 2022 than in 2010. As Figure 4 also shows, this is the case for practically all cantons.
+
+Figure 6 shows that three and four-room apartments have been on the market the most since 2010. In contrast, one and six-room apartments were the least vacant.
+Table 1 breaks down the trend over time from 2010 to 2022 by room type. The table underpins the figures in Figure 6. In every year since 2010, there have been significantly more vacant three- and four-bedroom apartments than one- and six-bedroom apartments. 
+This finding is not surprising, as the demand for three- and four-room apartments in Switzerland is much higher and, accordingly, many more such apartments are being built than one- and six-room apartments.  
+This is not surprising, as many more three- and four-room apartments are built than one- and six-room apartments.
+
+Figure 7 shows the average income tax rate for each canton over the last 12 years. The cantons of Obwalden, Nidwalden, Jura and Appenzellauserhoden have had the highest average income tax rates in recent years. In contrast, the cantons of Zug, Baselland and Baselstadt and the canton of Geneva have the lowest average income tax rates. These observations are partly consistent with the average vacancy rate of the cantons, where low vacancy rates can also be observed for the cantons of Zug and Basel, while the vacancy rate in the canton of Jura was very high.
+Figure 8 shows the income tax rate of each canton over time. It can be seen that the income tax rate in each canton shows very little fluctuation and has remained fairly constant over the years. The figures on vacancy rates and income tax rates from 2010 - 2022 show that there are some similarities between the two variables for certain cantons (e.g. Zug, Geneva, Basel or Jura). However, there are also examples where the two variables run counter to each other. The canton of Ticino has a relatively low income tax, but has had a trend towards a higher vacancy rate since 2016. The two factors for the canton of Obwalden also do not match. The canton of Obwalden has by far the highest income tax, but the number of vacant apartments is relatively low.
+To underpin these observations statistically, we carried out linear regression models and included the regression line in Figure 9. It is easy to see that the regression line for each year is almost horizontal. This means that the correlation between these two variables is very small. 
+This conclusion can be confirmed on the basis of statistical parameters seen in Table 3 and 4.The p-values partially failed to show significance and the R\(^2\) values indicate that only a small proportion of the variance can be explained by the included variables. Furthermore, the estimate values are rather small, showing that the effect of each variable is negligible. 
+Consequently, our hypothesis must be rejected. The vacancy rate appears to be influenced by many factors and is not really related to income, wealth or profit tax. Other factors as for example the mentioned above, probably have a much greater influence on the vacancy rate. This is indicated by our figures, which show that the vacancy rate tends to be higher in rural cantons than in cantons with a large city.
+
+
+\newpage
+
+[^1]: Bundesamt für Statistik (BFS). (11.09.2023). Leerwohnungszählung 2022: Leerwohnungsbestand in der Schweiz. Abgerufen am 30. Januar 2024, von https://www.bfs.admin.ch/bfs/de/home/statistiken/kataloge-datenbanken/tabellen.assetdetail.27565825.html
+
+[^2]: Eidgenössische Steuerverwaltung (ESTV). (18.01.2024). Steuerbelastung in den Gemeinden. Abgerufen am 30. Januar 2024, von https://www.estv.admin.ch/estv/de/home/die-estv/steuerstatistiken-estv/steuerbelastung-schweiz/belastung-gemeinden.html#-2084634149
+
+[^3]: Bundesamt für Landestopografie swisstopo. (08.01.2024). Amtliches Ortschaftenverzeichnis der Schweiz. Abgerufen am 30. Januar 2024, von https://www.swisstopo.admin.ch/de/amtliches-ortschaftenverzeichnis.html
+
+[^4]: Formula for calculating the vacancy rate
+
+[^5]: Hauseigentümerverband Schweiz. (n.d.). Leerwohnungsziffer. Abgerufen am 30. Januar 2024, von https://www.hev-schweiz.ch/vermieten/statistiken/leerwohnungsziffer
+
+[^6]: Sager, D. (2004). Überprüfung einer Ergänzung oder Ersetzung der Leerwohnungszählung durch eine IT-Lösung. Zürich
